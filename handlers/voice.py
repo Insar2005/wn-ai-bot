@@ -1,15 +1,11 @@
-"""Голосовые сообщения: скачиваем OGG → Whisper → Claude → ответ.
-
-Telegram присылает голосовые в OGG/Opus. Groq Whisper это ест
-из коробки, конвертировать не надо.
-"""
+"""Голосовые сообщения: скачиваем OGG → Whisper → agentic chat → ответ."""
 from __future__ import annotations
 
 import logging
 import tempfile
 from pathlib import Path
 
-from aiogram import Router, F
+from aiogram import F, Router
 from aiogram.enums import ChatAction
 from aiogram.types import Message
 
@@ -17,6 +13,8 @@ from ai.claude import chat_text
 from ai.whisper import transcribe
 from config import settings
 from db import load_recent_history, save_message
+from handlers.text import NOT_REGISTERED_MSG
+from tools.impl import resolve_user
 
 log = logging.getLogger(__name__)
 
@@ -27,10 +25,8 @@ router = Router()
 async def handle_voice(message: Message) -> None:
     if not message.from_user or not message.voice:
         return
-    user_id = message.from_user.id
+    tg_id = message.from_user.id
 
-    # Ограничение по длине — защита от абуза (кто-то может залить
-    # часовой файл случайно или нарочно)
     if message.voice.duration > settings.max_voice_seconds:
         await message.answer(
             f"Слишком длинное сообщение ({message.voice.duration} сек). "
@@ -40,7 +36,17 @@ async def handle_voice(message: Message) -> None:
 
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
-    # Скачиваем OGG во временный файл
+    user = await resolve_user(tg_id)
+    if user is None:
+        await message.answer(NOT_REGISTERED_MSG)
+        return
+
+    if user["is_disabled"]:
+        await message.answer(
+            "Твой аккаунт временно заблокирован. Проверь приложение."
+        )
+        return
+
     file = await message.bot.get_file(message.voice.file_id)
     if not file.file_path:
         await message.answer("Не смог скачать голосовое, попробуй ещё раз.")
@@ -51,7 +57,6 @@ async def handle_voice(message: Message) -> None:
     try:
         await message.bot.download_file(file.file_path, destination=tmp_path)
 
-        # Транскрибируем
         try:
             transcript = await transcribe(tmp_path)
         except Exception:
@@ -68,16 +73,18 @@ async def handle_voice(message: Message) -> None:
             )
             return
 
-        # Показываем юзеру что расслышал (полезно если Whisper ошибся)
         await message.answer(f"🎙 «{transcript}»")
 
-        # Дальше как обычный чат
         await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
         history = await load_recent_history(
-            user_id, limit=settings.context_messages_limit
+            tg_id, limit=settings.context_messages_limit
         )
         try:
-            reply, _ = await chat_text(history, transcript)
+            reply, _ = await chat_text(
+                history=history,
+                user_message=transcript,
+                user_id=user["user_id"],
+            )
         except Exception:
             log.exception("Claude call after voice failed")
             await message.answer(
@@ -85,17 +92,14 @@ async def handle_voice(message: Message) -> None:
             )
             return
 
-        # В историю пишем распознанный текст, чтобы контекст был читаемый.
-        # metadata содержит длительность и признак голоса — пригодится
-        # для аналитики позже.
         await save_message(
-            user_id,
+            tg_id,
             "user",
             "voice",
             transcript,
             metadata={"duration_sec": message.voice.duration},
         )
-        await save_message(user_id, "assistant", "text", reply)
+        await save_message(tg_id, "assistant", "text", reply)
 
         await message.answer(reply)
 

@@ -1,7 +1,8 @@
 """Async Postgres wrapper. Один pool на весь процесс бота.
 
-Схему для истории чата создаём миграцией 001_ai_chat_history.sql —
-её надо один раз применить к существующей БД Waiter Note.
+Схема истории AI-чата (ai_chat_history) создаётся автоматически при
+старте бота через ensure_schema(). Остальные таблицы (users, orders,
+shifts и т.д.) уже есть — их поддерживает WNReact backend.
 """
 from __future__ import annotations
 
@@ -18,8 +19,24 @@ log = logging.getLogger(__name__)
 _pool: Optional[asyncpg.Pool] = None
 
 
+SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS ai_chat_history (
+    id            BIGSERIAL PRIMARY KEY,
+    telegram_id   BIGINT NOT NULL,
+    role          TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+    content_type  TEXT NOT NULL CHECK (content_type IN ('text', 'voice', 'photo')),
+    content       TEXT NOT NULL,
+    metadata      JSONB,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS ix_ai_chat_history_telegram_id_created
+    ON ai_chat_history (telegram_id, created_at DESC);
+"""
+
+
 async def init_pool() -> None:
-    """Создать connection pool. Вызывается один раз при старте бота."""
+    """Создать connection pool + накатить схему."""
     global _pool
     if _pool is not None:
         return
@@ -27,10 +44,12 @@ async def init_pool() -> None:
         settings.database_url,
         min_size=1,
         max_size=10,
-        # Railway TLS требует ssl='require'; asyncpg сам разберётся
-        # по префиксу postgresql:// vs postgres://
     )
     log.info("Postgres pool initialised")
+
+    async with _pool.acquire() as conn:
+        await conn.execute(SCHEMA_SQL)
+    log.info("Schema ensured (ai_chat_history)")
 
 
 async def close_pool() -> None:
@@ -40,7 +59,8 @@ async def close_pool() -> None:
         _pool = None
 
 
-def _require_pool() -> asyncpg.Pool:
+def get_pool() -> asyncpg.Pool:
+    """Публичный accessor к pool. Использует tools/impl.py."""
     if _pool is None:
         raise RuntimeError("DB pool not initialised — call init_pool() first")
     return _pool
@@ -51,13 +71,12 @@ def _require_pool() -> asyncpg.Pool:
 
 async def save_message(
     telegram_id: int,
-    role: str,           # 'user' | 'assistant'
-    content_type: str,   # 'text' | 'voice' | 'photo'
+    role: str,
+    content_type: str,
     content: str,
     metadata: dict[str, Any] | None = None,
 ) -> None:
-    """Записать сообщение в историю AI-чата."""
-    pool = _require_pool()
+    pool = get_pool()
     await pool.execute(
         """
         INSERT INTO ai_chat_history
@@ -76,13 +95,7 @@ async def load_recent_history(
     telegram_id: int,
     limit: int = 20,
 ) -> list[dict[str, Any]]:
-    """Вернуть последние N сообщений в хронологическом порядке
-    (старые → новые), готовые к подаче в Claude.
-
-    Формат совпадает с messages array в Anthropic API:
-        [{"role": "user", "content": "..."}, ...]
-    """
-    pool = _require_pool()
+    pool = get_pool()
     rows = await pool.fetch(
         """
         SELECT role, content_type, content, metadata
@@ -94,7 +107,6 @@ async def load_recent_history(
         telegram_id,
         limit,
     )
-    # reverse чтобы получить хронологический порядок
     rows = list(reversed(rows))
     messages: list[dict[str, Any]] = []
     for r in rows:
@@ -103,13 +115,11 @@ async def load_recent_history(
 
 
 async def clear_history(telegram_id: int) -> int:
-    """Удалить всю историю юзера. Возвращает количество удалённых записей."""
-    pool = _require_pool()
+    pool = get_pool()
     result = await pool.execute(
         "DELETE FROM ai_chat_history WHERE telegram_id = $1",
         telegram_id,
     )
-    # execute возвращает строку вида "DELETE 5"
     try:
         return int(result.split()[-1])
     except (IndexError, ValueError):
