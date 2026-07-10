@@ -511,12 +511,12 @@ async def search_menu(
     params.append(limit)
     sql = f"""
         SELECT mi.id, mi.title, mi.description, mi.portion, mi.price,
-               mc.title AS category
-        FROM menu_items mi
-        JOIN menu_categories mc ON mc.id = mi.category_id
-        WHERE {" AND ".join(conditions)}
-        ORDER BY mc.position, mi.position, mi.title
-        LIMIT ${len(params)}
+       mi.comment_chips, mc.title AS category
+FROM menu_items mi
+JOIN menu_categories mc ON mc.id = mi.category_id
+WHERE {" AND ".join(conditions)}
+ORDER BY mc.position, mi.position, mi.title
+LIMIT ${len(params)}
     """
     rows = await pool.fetch(sql, *params)
     return [
@@ -526,6 +526,7 @@ async def search_menu(
             "description": r["description"],
             "portion": r["portion"],
             "price": float(r["price"]),
+            "comment_chips": r["comment_chips"] or [],  # jsonb → list
             "category": r["category"],
         }
         for r in rows
@@ -545,13 +546,13 @@ async def list_menu_categories(
 
     rows = await pool.fetch(
         """
-        SELECT mc.id, mc.title, mc.position,
-               (SELECT COUNT(*) FROM menu_items mi
-                WHERE mi.category_id = mc.id AND mi.is_active = TRUE)
-                    AS items_count
-        FROM menu_categories mc
-        WHERE mc.workplace_id = $1 AND mc.is_active = TRUE
-        ORDER BY mc.position, mc.title
+        SELECT mc.id, mc.title, mc.position, mc.parent_id,
+       (SELECT COUNT(*) FROM menu_items mi
+        WHERE mi.category_id = mc.id AND mi.is_active = TRUE)
+            AS items_count
+FROM menu_categories mc
+WHERE mc.workplace_id = $1 AND mc.is_active = TRUE
+ORDER BY mc.position, mc.title
         """,
         workplace_id,
     )
