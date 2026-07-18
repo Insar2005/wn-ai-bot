@@ -1077,3 +1077,52 @@ async def delete_menu_category(
     if not_found:
         out["not_found"] = not_found
     return out
+
+
+async def delete_menu_items(
+    user_id: int,
+    item_ids,
+) -> dict[str, Any]:
+    """Удалить одну или несколько ПОЗИЦИЙ меню (не категорий). item_ids:
+    список id (или один id строкой). Только после подтверждения плана."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+
+    if isinstance(item_ids, str):
+        item_ids = [item_ids]
+    item_ids = [str(i) for i in (item_ids or []) if i]
+    if not item_ids:
+        return {"error": "empty_item_ids"}
+    if len(item_ids) > 60:
+        return {"error": "too_many_items", "max": 60}
+
+    # только позиции этого заведения (join через категорию)
+    rows = await pool.fetch(
+        """
+        SELECT mi.id, mi.title
+        FROM menu_items mi
+        JOIN menu_categories mc ON mc.id = mi.category_id
+        WHERE mi.id = ANY($1::varchar[]) AND mc.workplace_id = $2
+        """,
+        item_ids,
+        workplace_id,
+    )
+    found = {r["id"]: r["title"] for r in rows}
+    not_found = [i for i in item_ids if i not in found]
+
+    if found:
+        await pool.execute(
+            "DELETE FROM menu_items WHERE id = ANY($1::varchar[])",
+            list(found.keys()),
+        )
+
+    out: dict[str, Any] = {
+        "ok": True,
+        "deleted_count": len(found),
+        "deleted": [{"id": i, "title": t} for i, t in found.items()],
+    }
+    if not_found:
+        out["not_found"] = not_found
+    return out

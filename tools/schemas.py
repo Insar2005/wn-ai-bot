@@ -286,6 +286,26 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "delete_menu_items",
+        "description": (
+            "УДАЛИТЬ одну или сразу НЕСКОЛЬКО ПОЗИЦИЙ меню (блюд/напитков), "
+            "не категорий. Необратимо. Для чистки дублей передавай весь "
+            "список id за один вызов (до 60). ВЫЗЫВАЙ СТРОГО после "
+            "подтверждения плана, где названо, что будет удалено."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "id позиций на удаление.",
+                }
+            },
+            "required": ["item_ids"],
+        },
+    },
+    {
         "name": "update_menu_item",
         "description": (
             "Правка позиции меню: description (описание блюда), price, "
