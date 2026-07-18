@@ -9,3 +9,4 @@ tenacity==9.0.0
 # Phase 3: HEIC-фото меню (iPhone шлёт файлом)
 Pillow>=10.0
 pillow-heif>=0.16
+sentry-sdk>=2.0

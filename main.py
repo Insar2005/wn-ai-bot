@@ -18,6 +18,21 @@ from aiogram.enums import ParseMode
 
 from config import settings
 from db import close_pool, init_pool
+
+# ── Sentry: только ошибки; включается наличием SENTRY_DSN в env ──────
+import os
+
+try:
+    import sentry_sdk
+
+    if os.getenv("SENTRY_DSN"):
+        sentry_sdk.init(
+            dsn=os.environ["SENTRY_DSN"],
+            environment=os.getenv("RAILWAY_ENVIRONMENT_NAME", "production"),
+            traces_sample_rate=0.0,
+        )
+except ImportError:
+    pass
 from handlers import router as main_router
 
 

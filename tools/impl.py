@@ -995,3 +995,59 @@ async def update_menu_item(
         *params,
     )
     return {"ok": True, "id": item_id}
+
+
+async def delete_menu_category(
+    user_id: int,
+    category_id: str,
+) -> dict[str, Any]:
+    """Удалить категорию ВМЕСТЕ с подкатегориями и всеми позициями внутри.
+    Вызывается только после явного подтверждения юзера (правило в промпте)."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+    root = await _category_in_workplace(category_id, workplace_id)
+    if root is None:
+        return {"error": "category_not_found"}
+
+    # собираем всё поддерево (BFS, с защитой от битых циклов в данных)
+    ids: list[str] = [category_id]
+    seen: set[str] = {category_id}
+    frontier = [category_id]
+    while frontier:
+        rows = await pool.fetch(
+            """
+            SELECT id FROM menu_categories
+            WHERE workplace_id = $1 AND parent_id = ANY($2::varchar[])
+            """,
+            workplace_id,
+            frontier,
+        )
+        frontier = [r["id"] for r in rows if r["id"] not in seen]
+        seen.update(frontier)
+        ids.extend(frontier)
+
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            items_deleted = await conn.fetchval(
+                """
+                WITH gone AS (
+                    DELETE FROM menu_items
+                    WHERE category_id = ANY($1::varchar[])
+                    RETURNING 1
+                )
+                SELECT COUNT(*) FROM gone
+                """,
+                ids,
+            )
+            await conn.execute(
+                "DELETE FROM menu_categories WHERE id = ANY($1::varchar[])",
+                ids,
+            )
+    return {
+        "ok": True,
+        "title": root["title"],
+        "categories_deleted": len(ids),
+        "items_deleted": int(items_deleted or 0),
+    }

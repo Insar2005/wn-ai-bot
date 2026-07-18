@@ -266,6 +266,20 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
     {
+        "name": "delete_menu_category",
+        "description": (
+            "УДАЛИТЬ категорию меню вместе с её подкатегориями и всеми "
+            "позициями внутри. Необратимо. ВЫЗЫВАЙ СТРОГО после явного "
+            "подтверждения юзером именно удаления (назови, что будет "
+            "удалено и сколько позиций)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {"category_id": {"type": "string"}},
+            "required": ["category_id"],
+        },
+    },
+    {
         "name": "update_menu_item",
         "description": (
             "Правка позиции меню: description (описание блюда), price, "
