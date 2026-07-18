@@ -194,6 +194,10 @@ TOOLS: list[dict[str, Any]] = [
             "properties": {
                 "category_id": {"type": "string", "description": "Фильтр по категории."},
                 "limit": {"type": "integer", "description": "Максимум строк, по умолчанию 300."},
+                "include_hidden": {
+                    "type": "boolean",
+                    "description": "true — показать и скрытые (is_active=false) позиции/категории.",
+                },
             },
             "required": [],
         },
@@ -220,9 +224,10 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "update_menu_category",
         "description": (
-            "Переименовать категорию и/или переместить её. parent_id: id "
-            "нового родителя, ПУСТАЯ СТРОКА — сделать корневой, не "
-            "передан — не менять. Циклы запрещены."
+            "Переименовать категорию, переместить (parent_id: id нового "
+            "родителя, ПУСТАЯ СТРОКА — в корень, не передан — не менять; "
+            "циклы запрещены) и/или скрыть-показать (is_active: false = "
+            "спрятать из меню целиком, не удаляя)."
         ),
         "input_schema": {
             "type": "object",
@@ -230,6 +235,7 @@ TOOLS: list[dict[str, Any]] = [
                 "category_id": {"type": "string"},
                 "title": {"type": "string"},
                 "parent_id": {"type": "string"},
+                "is_active": {"type": "boolean"},
             },
             "required": ["category_id"],
         },
@@ -308,10 +314,12 @@ TOOLS: list[dict[str, Any]] = [
     {
         "name": "update_menu_item",
         "description": (
-            "Правка позиции меню: description (описание блюда), price, "
-            "portion, title, category_id (перенос в другую категорию/"
-            "подкатегорию — так делается раскладка меню). Для массовой "
-            "раскладки вызывай по одной позиции после подтверждения плана."
+            "Правка позиции меню: description, price, portion, title, "
+            "category_id (перенос — так делается раскладка), is_active "
+            "(false = СКРЫТЬ из меню не удаляя: «закончилось», сезонное; "
+            "true = вернуть), comment_chips (быстрые комментарии к блюду: "
+            "«без лука», «острое» — до 10 шт, массив заменяется целиком). "
+            "Для массовой раскладки вызывай по одной после подтверждения."
         ),
         "input_schema": {
             "type": "object",
@@ -322,6 +330,8 @@ TOOLS: list[dict[str, Any]] = [
                 "portion": {"type": "string"},
                 "description": {"type": "string"},
                 "category_id": {"type": "string"},
+                "is_active": {"type": "boolean"},
+                "comment_chips": {"type": "array", "items": {"type": "string"}},
             },
             "required": ["item_id"],
         },
@@ -384,6 +394,90 @@ TOOLS: list[dict[str, Any]] = [
                 "days": {"type": "integer", "description": "Период в днях, 1-90. По умолчанию 7."},
             },
             "required": [],
+        },
+    },
+
+    # ── Заметки/напоминалки: правка и удаление; порядок в меню ─────
+    {
+        "name": "update_note",
+        "description": "Изменить заметку: content — новый текст, header — заголовок (пустая строка = убрать).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "note_id": {"type": "string"},
+                "content": {"type": "string"},
+                "header": {"type": "string"},
+            },
+            "required": ["note_id"],
+        },
+    },
+    {
+        "name": "delete_notes",
+        "description": "Удалить заметки (список note_ids, до 60). Единичную — сразу; массовую чистку — после плана.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "note_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["note_ids"],
+        },
+    },
+    {
+        "name": "update_reminder",
+        "description": (
+            "Изменить напоминалку: is_done=true — отметить выполненной "
+            "(«я уже позвонил»), remind_at_iso «YYYY-MM-DD HH:MM» — "
+            "перенести (снова станет активной; для относительного времени "
+            "сначала get_datetime_now), text — новый текст."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reminder_id": {"type": "string"},
+                "text": {"type": "string"},
+                "remind_at_iso": {"type": "string"},
+                "is_done": {"type": "boolean"},
+            },
+            "required": ["reminder_id"],
+        },
+    },
+    {
+        "name": "delete_reminders",
+        "description": "Удалить напоминалки (список reminder_ids, до 60).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "reminder_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["reminder_ids"],
+        },
+    },
+    {
+        "name": "reorder_menu_categories",
+        "description": (
+            "Задать порядок категорий: передай ВСЕ id одного уровня "
+            "(одного родителя) в нужном порядке. После подтверждения плана."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["category_ids"],
+        },
+    },
+    {
+        "name": "reorder_menu_items",
+        "description": (
+            "Задать порядок позиций внутри одной категории: передай ВСЕ id "
+            "категории в нужном порядке. После подтверждения плана."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item_ids": {"type": "array", "items": {"type": "string"}},
+            },
+            "required": ["item_ids"],
         },
     },
 

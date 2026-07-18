@@ -713,16 +713,22 @@ async def list_menu_items(
     user_id: int,
     category_id: Optional[str] = None,
     limit: int = 300,
+    include_hidden: bool = False,
 ) -> list[dict[str, Any]]:
-    """Полный список позиций меню (для раскладки по категориям и ревизии
-    описаний). category_id — опциональный фильтр."""
+    """Полный список позиций меню (раскладка, ревизия описаний, чипы,
+    скрытые). include_hidden=True показывает и скрытые (is_active=false)
+    позиции/категории — нужно, чтобы вернуть блюдо в меню."""
+    import json as _json
+
     pool = get_pool()
     workplace_id = await _active_workplace_checked(user_id)
     if workplace_id is None:
         return []
 
     params: list[Any] = [workplace_id]
-    cond = "mc.workplace_id = $1 AND mi.is_active = TRUE AND mc.is_active = TRUE"
+    cond = "mc.workplace_id = $1"
+    if not include_hidden:
+        cond += " AND mi.is_active = TRUE AND mc.is_active = TRUE"
     if category_id:
         params.append(category_id)
         cond += f" AND mi.category_id = ${len(params)}"
@@ -730,6 +736,7 @@ async def list_menu_items(
     rows = await pool.fetch(
         f"""
         SELECT mi.id, mi.title, mi.price, mi.portion, mi.description,
+               mi.is_active, mi.comment_chips,
                mi.category_id, mc.title AS category, mc.parent_id AS category_parent_id
         FROM menu_items mi
         JOIN menu_categories mc ON mc.id = mi.category_id
@@ -739,6 +746,15 @@ async def list_menu_items(
         """,
         *params,
     )
+
+    def _chips(raw: Any) -> list:
+        if isinstance(raw, str):
+            try:
+                return _json.loads(raw or "[]")
+            except Exception:
+                return []
+        return list(raw or [])
+
     return [
         {
             "id": r["id"],
@@ -747,6 +763,8 @@ async def list_menu_items(
             "portion": r["portion"],
             "has_description": bool(r["description"]),
             "description": r["description"],
+            "is_active": bool(r["is_active"]),
+            "comment_chips": _chips(r["comment_chips"]),
             "category_id": r["category_id"],
             "category": r["category"],
         }
@@ -801,6 +819,7 @@ async def update_menu_category(
     category_id: str,
     title: Optional[str] = None,
     parent_id: Optional[str] = None,
+    is_active: Optional[bool] = None,
 ) -> dict[str, Any]:
     """Переименовать категорию и/или переместить. parent_id: не передан —
     не трогаем; "" (пустая строка) — сделать корневой; id — новый родитель.
@@ -841,6 +860,10 @@ async def update_menu_category(
                 )
         params.append(new_parent)
         sets.append(f"parent_id = ${len(params)}")
+
+    if is_active is not None:
+        params.append(bool(is_active))
+        sets.append(f"is_active = ${len(params)}")
 
     if not sets:
         return {"error": "nothing_to_update"}
@@ -939,6 +962,8 @@ async def update_menu_item(
     portion: Optional[str] = None,
     description: Optional[str] = None,
     category_id: Optional[str] = None,
+    is_active: Optional[bool] = None,
+    comment_chips: Optional[list] = None,
 ) -> dict[str, Any]:
     """Правка позиции: описание, цена, порция, название, перенос в другую
     категорию (category_id)."""
@@ -986,6 +1011,15 @@ async def update_menu_item(
         )
         add("category_id", category_id)
         add("position", new_pos)
+    if is_active is not None:
+        add("is_active", bool(is_active))
+    if comment_chips is not None:
+        # быстрые комментарии к блюду («без лука», «острое»): до 10 по 30 симв.
+        import json as _json
+
+        chips = [str(c).strip()[:30] for c in comment_chips if str(c).strip()][:10]
+        params.append(_json.dumps(chips, ensure_ascii=False))
+        sets.append(f"comment_chips = ${len(params)}::jsonb")
 
     if not sets:
         return {"error": "nothing_to_update"}
@@ -1327,3 +1361,237 @@ async def sales_summary(
         ],
         "no_sales_items": [r["title"] for r in dead],
     }
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Заметки/напоминалки: правка и удаление; порядок в меню
+# ═══════════════════════════════════════════════════════════════════
+
+
+async def update_note(
+    user_id: int,
+    note_id: str,
+    content: Optional[str] = None,
+    header: Optional[str] = None,
+) -> dict[str, Any]:
+    """Изменить свою заметку: content — новый текст, header — новый
+    заголовок ("" — убрать заголовок)."""
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id FROM notes WHERE id = $1 AND user_id = $2", note_id, user_id
+    )
+    if row is None:
+        return {"error": "note_not_found"}
+    sets: list[str] = []
+    params: list[Any] = []
+    if content is not None and content.strip():
+        params.append(content.strip()[:4000])
+        sets.append(f"content = ${len(params)}")
+    if header is not None:
+        params.append(header.strip()[:100] or None)
+        sets.append(f"header = ${len(params)}")
+    if not sets:
+        return {"error": "nothing_to_update"}
+    params.append(int(__import__("time").time()))
+    sets.append(f"updated_at = ${len(params)}")
+    params.append(note_id)
+    await pool.execute(
+        f"UPDATE notes SET {', '.join(sets)} WHERE id = ${len(params)}", *params
+    )
+    return {"ok": True, "id": note_id}
+
+
+async def delete_notes(user_id: int, note_ids) -> dict[str, Any]:
+    """Удалить свои заметки (одну или список id, до 60)."""
+    pool = get_pool()
+    if isinstance(note_ids, str):
+        note_ids = [note_ids]
+    note_ids = [str(n) for n in (note_ids or []) if n]
+    if not note_ids:
+        return {"error": "empty_note_ids"}
+    if len(note_ids) > 60:
+        return {"error": "too_many", "max": 60}
+    rows = await pool.fetch(
+        """
+        WITH gone AS (
+            DELETE FROM notes
+            WHERE id = ANY($1::varchar[]) AND user_id = $2
+            RETURNING id, header, content
+        )
+        SELECT id, header, content FROM gone
+        """,
+        note_ids,
+        user_id,
+    )
+    deleted = [
+        {"id": r["id"], "title": r["header"] or (r["content"] or "")[:40]}
+        for r in rows
+    ]
+    out: dict[str, Any] = {"ok": True, "deleted_count": len(deleted), "deleted": deleted}
+    missing = [n for n in note_ids if n not in {d["id"] for d in deleted}]
+    if missing:
+        out["not_found"] = missing
+    return out
+
+
+async def update_reminder(
+    user_id: int,
+    reminder_id: str,
+    text: Optional[str] = None,
+    remind_at_iso: Optional[str] = None,
+    is_done: Optional[bool] = None,
+) -> dict[str, Any]:
+    """Изменить свою напоминалку: перенести время (remind_at_iso в
+    таймзоне юзера, «YYYY-MM-DD HH:MM»), поменять текст или отметить
+    выполненной/снова активной (is_done)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    pool = get_pool()
+    row = await pool.fetchrow(
+        "SELECT id FROM reminders WHERE id = $1 AND user_id = $2",
+        reminder_id,
+        user_id,
+    )
+    if row is None:
+        return {"error": "reminder_not_found"}
+    sets: list[str] = []
+    params: list[Any] = []
+    if text is not None and text.strip():
+        params.append(text.strip()[:255])
+        sets.append(f"text = ${len(params)}")
+    if remind_at_iso is not None:
+        tz_name = (
+            await pool.fetchval("SELECT timezone FROM users WHERE id = $1", user_id)
+            or "Europe/Moscow"
+        )
+        try:
+            dt = datetime.strptime(remind_at_iso.strip(), "%Y-%m-%d %H:%M")
+            dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+        except Exception:
+            return {"error": "bad_datetime", "expected": "YYYY-MM-DD HH:MM"}
+        params.append(int(dt.timestamp()))
+        sets.append(f"remind_at = ${len(params)}")
+        # перенос делает напоминалку снова активной и «неотправленной»
+        sets.append("is_done = FALSE")
+        sets.append("notified_at = NULL")
+    if is_done is not None:
+        params.append(bool(is_done))
+        sets.append(f"is_done = ${len(params)}")
+    if not sets:
+        return {"error": "nothing_to_update"}
+    params.append(reminder_id)
+    await pool.execute(
+        f"UPDATE reminders SET {', '.join(sets)} WHERE id = ${len(params)}",
+        *params,
+    )
+    return {"ok": True, "id": reminder_id}
+
+
+async def delete_reminders(user_id: int, reminder_ids) -> dict[str, Any]:
+    """Удалить свои напоминалки (одну или список id, до 60)."""
+    pool = get_pool()
+    if isinstance(reminder_ids, str):
+        reminder_ids = [reminder_ids]
+    reminder_ids = [str(r) for r in (reminder_ids or []) if r]
+    if not reminder_ids:
+        return {"error": "empty_reminder_ids"}
+    if len(reminder_ids) > 60:
+        return {"error": "too_many", "max": 60}
+    rows = await pool.fetch(
+        """
+        WITH gone AS (
+            DELETE FROM reminders
+            WHERE id = ANY($1::varchar[]) AND user_id = $2
+            RETURNING id, text
+        )
+        SELECT id, text FROM gone
+        """,
+        reminder_ids,
+        user_id,
+    )
+    deleted = [{"id": r["id"], "text": r["text"]} for r in rows]
+    out: dict[str, Any] = {"ok": True, "deleted_count": len(deleted), "deleted": deleted}
+    missing = [r for r in reminder_ids if r not in {d["id"] for d in deleted}]
+    if missing:
+        out["not_found"] = missing
+    return out
+
+
+async def reorder_menu_categories(user_id: int, category_ids) -> dict[str, Any]:
+    """Задать порядок категорий: список id в нужном порядке. Все должны
+    быть одного заведения и одного родителя (корень — тоже родитель)."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+    category_ids = [str(c) for c in (category_ids or []) if c]
+    if len(category_ids) < 2:
+        return {"error": "need_at_least_two"}
+    if len(category_ids) > 80:
+        return {"error": "too_many", "max": 80}
+    rows = await pool.fetch(
+        """
+        SELECT id, parent_id FROM menu_categories
+        WHERE id = ANY($1::varchar[]) AND workplace_id = $2
+        """,
+        category_ids,
+        workplace_id,
+    )
+    found = {r["id"]: r["parent_id"] for r in rows}
+    missing = [c for c in category_ids if c not in found]
+    if missing:
+        return {"error": "category_not_found", "ids": missing}
+    parents = {found[c] for c in category_ids}
+    if len(parents) > 1:
+        return {"error": "mixed_parents",
+                "hint": "переупорядочивать можно только внутри одного родителя"}
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for pos, cid in enumerate(category_ids):
+                await conn.execute(
+                    "UPDATE menu_categories SET position = $1 WHERE id = $2",
+                    pos,
+                    cid,
+                )
+    return {"ok": True, "reordered": len(category_ids)}
+
+
+async def reorder_menu_items(user_id: int, item_ids) -> dict[str, Any]:
+    """Задать порядок позиций внутри одной категории: список id в нужном
+    порядке."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+    item_ids = [str(i) for i in (item_ids or []) if i]
+    if len(item_ids) < 2:
+        return {"error": "need_at_least_two"}
+    if len(item_ids) > 120:
+        return {"error": "too_many", "max": 120}
+    rows = await pool.fetch(
+        """
+        SELECT mi.id, mi.category_id
+        FROM menu_items mi
+        JOIN menu_categories mc ON mc.id = mi.category_id
+        WHERE mi.id = ANY($1::varchar[]) AND mc.workplace_id = $2
+        """,
+        item_ids,
+        workplace_id,
+    )
+    found = {r["id"]: r["category_id"] for r in rows}
+    missing = [i for i in item_ids if i not in found]
+    if missing:
+        return {"error": "item_not_found", "ids": missing}
+    if len({found[i] for i in item_ids}) > 1:
+        return {"error": "mixed_categories",
+                "hint": "переупорядочивать можно только внутри одной категории"}
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for pos, iid in enumerate(item_ids):
+                await conn.execute(
+                    "UPDATE menu_items SET position = $1 WHERE id = $2",
+                    pos,
+                    iid,
+                )
+    return {"ok": True, "reordered": len(item_ids)}
