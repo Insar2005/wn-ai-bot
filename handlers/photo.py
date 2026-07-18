@@ -16,6 +16,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import Message
 
 from ai.claude import chat_vision
+from concurrency import BUSY_MSG, is_busy, lock_for, typing
 from config import settings
 from db import load_recent_history, save_message
 from handlers.text import NOT_REGISTERED_MSG
@@ -56,6 +57,10 @@ async def _vision_flow(
     """Общий путь: юзер → история → Claude Vision → сохранение → ответ."""
     tg_id = message.from_user.id
 
+    if is_busy(tg_id):
+        await message.answer(BUSY_MSG)
+        return
+
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
     user = await resolve_user(tg_id)
@@ -73,13 +78,14 @@ async def _vision_flow(
     )
 
     try:
-        reply, _ = await chat_vision(
-            history=history,
-            image_bytes=image_bytes,
-            image_media_type=media_type,
-            user_caption=caption,
-            user_id=user["user_id"],
-        )
+        async with lock_for(tg_id), typing(message.bot, message.chat.id):
+            reply, _ = await chat_vision(
+                history=history,
+                image_bytes=image_bytes,
+                image_media_type=media_type,
+                user_caption=caption,
+                user_id=user["user_id"],
+            )
     except Exception:
         log.exception("Claude vision failed")
         await message.answer(
@@ -92,7 +98,7 @@ async def _vision_flow(
     await save_message(tg_id, "user", "photo", f"[фото] {caption}", metadata=meta)
     await save_message(tg_id, "assistant", "text", reply)
 
-    await message.answer(reply)
+    await message.answer(reply or "Готово.")
 
 
 @router.message(F.photo)

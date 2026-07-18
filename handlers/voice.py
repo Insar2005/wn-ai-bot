@@ -10,6 +10,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import Message
 
 from ai.claude import chat_text
+from concurrency import BUSY_MSG, is_busy, lock_for, typing
 from ai.whisper import transcribe
 from config import settings
 from db import load_recent_history, save_message
@@ -26,6 +27,10 @@ async def handle_voice(message: Message) -> None:
     if not message.from_user or not message.voice:
         return
     tg_id = message.from_user.id
+
+    if is_busy(tg_id):
+        await message.answer(BUSY_MSG)
+        return
 
     if message.voice.duration > settings.max_voice_seconds:
         await message.answer(
@@ -75,16 +80,16 @@ async def handle_voice(message: Message) -> None:
 
         await message.answer(f"🎙 «{transcript}»")
 
-        await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
         history = await load_recent_history(
             tg_id, limit=settings.context_messages_limit
         )
         try:
-            reply, _ = await chat_text(
-                history=history,
-                user_message=transcript,
-                user_id=user["user_id"],
-            )
+            async with lock_for(tg_id), typing(message.bot, message.chat.id):
+                reply, _ = await chat_text(
+                    history=history,
+                    user_message=transcript,
+                    user_id=user["user_id"],
+                )
         except Exception:
             log.exception("Claude call after voice failed")
             await message.answer(
@@ -101,7 +106,7 @@ async def handle_voice(message: Message) -> None:
         )
         await save_message(tg_id, "assistant", "text", reply)
 
-        await message.answer(reply)
+        await message.answer(reply or "Готово.")
 
     finally:
         tmp_path.unlink(missing_ok=True)

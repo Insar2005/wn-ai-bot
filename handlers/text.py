@@ -8,6 +8,7 @@ from aiogram.enums import ChatAction
 from aiogram.types import Message
 
 from ai.claude import chat_text
+from concurrency import BUSY_MSG, is_busy, lock_for, typing
 from config import settings
 from db import load_recent_history, save_message
 from tools.impl import resolve_user
@@ -34,6 +35,12 @@ async def handle_text(message: Message) -> None:
     if not text:
         return
 
+    # Уже выполняем прошлый запрос этого юзера — не запускаем второй
+    # агент-цикл параллельно (две руки в одном меню = каша).
+    if is_busy(tg_id):
+        await message.answer(BUSY_MSG)
+        return
+
     await message.bot.send_chat_action(message.chat.id, ChatAction.TYPING)
 
     # Резолвим tg_id → user_id
@@ -53,11 +60,13 @@ async def handle_text(message: Message) -> None:
     )
 
     try:
-        reply, _usage = await chat_text(
-            history=history,
-            user_message=text,
-            user_id=user["user_id"],
-        )
+        # Лок на юзера + «печатает…» живёт всю долгую операцию.
+        async with lock_for(tg_id), typing(message.bot, message.chat.id):
+            reply, _usage = await chat_text(
+                history=history,
+                user_message=text,
+                user_id=user["user_id"],
+            )
     except Exception:
         log.exception("Claude text call failed")
         await message.answer(
@@ -68,4 +77,4 @@ async def handle_text(message: Message) -> None:
     await save_message(tg_id, "user", "text", text)
     await save_message(tg_id, "assistant", "text", reply)
 
-    await message.answer(reply)
+    await message.answer(reply or "Готово.")
