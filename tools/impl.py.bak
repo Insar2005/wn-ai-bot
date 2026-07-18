@@ -287,7 +287,7 @@ async def list_active_orders(
                (SELECT COUNT(*) FROM order_items oi WHERE oi.order_id = o.id)
                    AS items_count,
                (SELECT COUNT(*) FROM order_items oi
-                    WHERE oi.order_id = o.id AND oi.served < oi.quantity)
+                    WHERE oi.order_id = o.id AND oi.served = FALSE)
                    AS unserved_count
         FROM orders o
         JOIN shifts s ON s.id = o.shift_id
@@ -373,9 +373,7 @@ async def get_order(user_id: int, order_id: str) -> dict[str, Any]:
                 "quantity": i["quantity"],
                 "total": float(i["total_price"]),
                 "comment": i["comment"],
-                # счётчик поданных штук: 0..quantity
                 "served": i["served"],
-                "served_full": i["served"] >= i["quantity"],
                 "guest": i["guest"],
             }
             for i in items
