@@ -41,6 +41,11 @@ _TOOLS: dict[str, Callable[..., Awaitable[Any]]] = {
     "list_tables": impl.list_tables,
     "search_menu": impl.search_menu,
     "list_menu_categories": impl.list_menu_categories,
+    "list_menu_items": impl.list_menu_items,
+    "create_menu_category": impl.create_menu_category,
+    "update_menu_category": impl.update_menu_category,
+    "create_menu_items": impl.create_menu_items,
+    "update_menu_item": impl.update_menu_item,
     "list_notes": impl.list_notes,
     "list_reminders": impl.list_reminders,
 }

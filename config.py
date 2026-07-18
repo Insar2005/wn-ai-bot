@@ -16,6 +16,10 @@ class Settings(BaseSettings):
     anthropic_api_key: str
     groq_api_key: str
     claude_model: str = "claude-haiku-4-5-20251001"
+    # Отдельная модель для фото (пусто = использовать claude_model).
+    # Для чтения меню с фото ставь claude-sonnet-4-6 — Haiku размытый
+    # текст не тянет.
+    claude_vision_model: str = ""
     whisper_model: str = "whisper-large-v3"
 
     # DB

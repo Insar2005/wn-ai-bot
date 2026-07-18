@@ -662,3 +662,336 @@ async def list_reminders(
         }
         for r in rows
     ]
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 3: запись в меню (импорт с фото, описания, раскладка)
+# ═══════════════════════════════════════════════════════════════════
+
+_NANO_ALPHABET = "useandom-26T198340PX75pxJACKVERYMINDBUSHWOLF_GQZbfghjklqvwyzrict"
+
+
+def _nanoid(size: int = 21) -> str:
+    """Nanoid, совместимый с фронтом/бэком (21 символ, тот же алфавит)."""
+    import secrets
+
+    return "".join(secrets.choice(_NANO_ALPHABET) for _ in range(size))
+
+
+async def _active_workplace_checked(user_id: int) -> Optional[str]:
+    """last_workplace_id юзера + проверка членства. None = нет доступа."""
+    pool = get_pool()
+    workplace_id = await pool.fetchval(
+        "SELECT last_workplace_id FROM users WHERE id = $1", user_id
+    )
+    if workplace_id is None:
+        return None
+    has_access = await pool.fetchval(
+        """
+        SELECT 1 FROM workplace_members
+        WHERE workplace_id = $1 AND user_id = $2
+        """,
+        workplace_id,
+        user_id,
+    )
+    return workplace_id if has_access else None
+
+
+async def _category_in_workplace(category_id: str, workplace_id: str):
+    pool = get_pool()
+    return await pool.fetchrow(
+        """
+        SELECT id, title, parent_id FROM menu_categories
+        WHERE id = $1 AND workplace_id = $2
+        """,
+        category_id,
+        workplace_id,
+    )
+
+
+async def list_menu_items(
+    user_id: int,
+    category_id: Optional[str] = None,
+    limit: int = 300,
+) -> list[dict[str, Any]]:
+    """Полный список позиций меню (для раскладки по категориям и ревизии
+    описаний). category_id — опциональный фильтр."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return []
+
+    params: list[Any] = [workplace_id]
+    cond = "mc.workplace_id = $1 AND mi.is_active = TRUE AND mc.is_active = TRUE"
+    if category_id:
+        params.append(category_id)
+        cond += f" AND mi.category_id = ${len(params)}"
+    params.append(min(int(limit), 500))
+    rows = await pool.fetch(
+        f"""
+        SELECT mi.id, mi.title, mi.price, mi.portion, mi.description,
+               mi.category_id, mc.title AS category, mc.parent_id AS category_parent_id
+        FROM menu_items mi
+        JOIN menu_categories mc ON mc.id = mi.category_id
+        WHERE {cond}
+        ORDER BY mc.position, mi.position, mi.title
+        LIMIT ${len(params)}
+        """,
+        *params,
+    )
+    return [
+        {
+            "id": r["id"],
+            "title": r["title"],
+            "price": float(r["price"]),
+            "portion": r["portion"],
+            "has_description": bool(r["description"]),
+            "description": r["description"],
+            "category_id": r["category_id"],
+            "category": r["category"],
+        }
+        for r in rows
+    ]
+
+
+async def create_menu_category(
+    user_id: int,
+    title: str,
+    parent_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Создать категорию (или подкатегорию, если задан parent_id)."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+    title = (title or "").strip()
+    if not title:
+        return {"error": "empty_title"}
+    if parent_id:
+        parent = await _category_in_workplace(parent_id, workplace_id)
+        if parent is None:
+            return {"error": "parent_not_found"}
+
+    cat_id = _nanoid()
+    max_pos = await pool.fetchval(
+        """
+        SELECT COALESCE(MAX(position), -1) FROM menu_categories
+        WHERE workplace_id = $1
+          AND parent_id IS NOT DISTINCT FROM $2
+        """,
+        workplace_id,
+        parent_id,
+    )
+    await pool.execute(
+        """
+        INSERT INTO menu_categories (id, workplace_id, title, parent_id, position, is_active)
+        VALUES ($1, $2, $3, $4, $5, TRUE)
+        """,
+        cat_id,
+        workplace_id,
+        title[:100],
+        parent_id,
+        (max_pos or 0) + 1,
+    )
+    return {"id": cat_id, "title": title, "parent_id": parent_id}
+
+
+async def update_menu_category(
+    user_id: int,
+    category_id: str,
+    title: Optional[str] = None,
+    parent_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Переименовать категорию и/или переместить. parent_id: не передан —
+    не трогаем; "" (пустая строка) — сделать корневой; id — новый родитель.
+    Защита от циклов (категория в собственное поддерево)."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+    cat = await _category_in_workplace(category_id, workplace_id)
+    if cat is None:
+        return {"error": "category_not_found"}
+
+    sets: list[str] = []
+    params: list[Any] = []
+    if title is not None and title.strip():
+        params.append(title.strip()[:100])
+        sets.append(f"title = ${len(params)}")
+
+    if parent_id is not None:
+        new_parent = None if parent_id == "" else parent_id
+        if new_parent == category_id:
+            return {"error": "cannot_parent_self"}
+        if new_parent:
+            parent = await _category_in_workplace(new_parent, workplace_id)
+            if parent is None:
+                return {"error": "parent_not_found"}
+            # подъём по цепочке: цикл?
+            cursor = parent
+            seen: set[str] = set()
+            while cursor is not None and cursor["parent_id"]:
+                if cursor["parent_id"] == category_id:
+                    return {"error": "would_create_cycle"}
+                if cursor["parent_id"] in seen:
+                    break
+                seen.add(cursor["parent_id"])
+                cursor = await _category_in_workplace(
+                    cursor["parent_id"], workplace_id
+                )
+        params.append(new_parent)
+        sets.append(f"parent_id = ${len(params)}")
+
+    if not sets:
+        return {"error": "nothing_to_update"}
+    params.append(category_id)
+    await pool.execute(
+        f"UPDATE menu_categories SET {', '.join(sets)} WHERE id = ${len(params)}",
+        *params,
+    )
+    return {"ok": True, "id": category_id}
+
+
+async def create_menu_items(
+    user_id: int,
+    items: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Батч-создание позиций (импорт меню). Каждый item:
+    {category_id, title, price, portion?, description?}. До 60 за вызов."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+    if not items:
+        return {"error": "empty_items"}
+    if len(items) > 60:
+        return {"error": "too_many_items", "max": 60}
+
+    # валидация категорий одним заходом
+    cat_ids = {str(i.get("category_id") or "") for i in items}
+    if "" in cat_ids:
+        return {"error": "item_without_category"}
+    rows = await pool.fetch(
+        """
+        SELECT id FROM menu_categories
+        WHERE workplace_id = $1 AND id = ANY($2::varchar[])
+        """,
+        workplace_id,
+        list(cat_ids),
+    )
+    found = {r["id"] for r in rows}
+    missing = cat_ids - found
+    if missing:
+        return {"error": "category_not_found", "ids": sorted(missing)}
+
+    # позиции: продолжаем нумерацию в каждой категории
+    pos_rows = await pool.fetch(
+        """
+        SELECT category_id, COALESCE(MAX(position), -1) AS mx
+        FROM menu_items WHERE category_id = ANY($1::varchar[])
+        GROUP BY category_id
+        """,
+        list(cat_ids),
+    )
+    next_pos = {r["category_id"]: r["mx"] + 1 for r in pos_rows}
+
+    created: list[dict[str, Any]] = []
+    async with pool.acquire() as conn:
+        async with conn.transaction():
+            for raw in items:
+                cid = str(raw["category_id"])
+                title = str(raw.get("title") or "").strip()[:150]
+                if not title:
+                    continue
+                try:
+                    price = round(float(raw.get("price") or 0), 2)
+                except (TypeError, ValueError):
+                    price = 0.0
+                pos = next_pos.get(cid, 0)
+                next_pos[cid] = pos + 1
+                item_id = _nanoid()
+                await conn.execute(
+                    """
+                    INSERT INTO menu_items
+                        (id, category_id, title, description, portion, price,
+                         comment_chips, position, is_active)
+                    VALUES ($1, $2, $3, $4, $5, $6, '[]'::jsonb, $7, TRUE)
+                    """,
+                    item_id,
+                    cid,
+                    title,
+                    (str(raw.get("description")).strip()[:2000]
+                     if raw.get("description") else None),
+                    (str(raw.get("portion")).strip()[:50]
+                     if raw.get("portion") else None),
+                    price,
+                    pos,
+                )
+                created.append({"id": item_id, "title": title, "price": price})
+    return {"ok": True, "created_count": len(created), "created": created}
+
+
+async def update_menu_item(
+    user_id: int,
+    item_id: str,
+    title: Optional[str] = None,
+    price: Optional[float] = None,
+    portion: Optional[str] = None,
+    description: Optional[str] = None,
+    category_id: Optional[str] = None,
+) -> dict[str, Any]:
+    """Правка позиции: описание, цена, порция, название, перенос в другую
+    категорию (category_id)."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+    row = await pool.fetchrow(
+        """
+        SELECT mi.id FROM menu_items mi
+        JOIN menu_categories mc ON mc.id = mi.category_id
+        WHERE mi.id = $1 AND mc.workplace_id = $2
+        """,
+        item_id,
+        workplace_id,
+    )
+    if row is None:
+        return {"error": "item_not_found"}
+
+    sets: list[str] = []
+    params: list[Any] = []
+
+    def add(field: str, value: Any) -> None:
+        params.append(value)
+        sets.append(f"{field} = ${len(params)}")
+
+    if title is not None and title.strip():
+        add("title", title.strip()[:150])
+    if price is not None:
+        try:
+            add("price", round(float(price), 2))
+        except (TypeError, ValueError):
+            return {"error": "bad_price"}
+    if portion is not None:
+        add("portion", portion.strip()[:50] or None)
+    if description is not None:
+        add("description", description.strip()[:2000] or None)
+    if category_id is not None:
+        target = await _category_in_workplace(category_id, workplace_id)
+        if target is None:
+            return {"error": "category_not_found"}
+        new_pos = await pool.fetchval(
+            "SELECT COALESCE(MAX(position), -1) + 1 FROM menu_items WHERE category_id = $1",
+            category_id,
+        )
+        add("category_id", category_id)
+        add("position", new_pos)
+
+    if not sets:
+        return {"error": "nothing_to_update"}
+    params.append(item_id)
+    await pool.execute(
+        f"UPDATE menu_items SET {', '.join(sets)} WHERE id = ${len(params)}",
+        *params,
+    )
+    return {"ok": True, "id": item_id}

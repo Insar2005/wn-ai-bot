@@ -180,6 +180,113 @@ TOOLS: list[dict[str, Any]] = [
         "input_schema": {"type": "object", "properties": {}, "required": []},
     },
 
+    # ── Меню: запись (Phase 3) ─────────────────────────────────────
+    {
+        "name": "list_menu_items",
+        "description": (
+            "ВСЕ позиции меню (id, название, цена, категория, есть ли "
+            "описание). Вызывай перед раскладкой по категориям или "
+            "ревизией описаний — чтобы видеть полную картину. "
+            "category_id — опциональный фильтр."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category_id": {"type": "string", "description": "Фильтр по категории."},
+                "limit": {"type": "integer", "description": "Максимум строк, по умолчанию 300."},
+            },
+            "required": [],
+        },
+    },
+    {
+        "name": "create_menu_category",
+        "description": (
+            "Создать категорию меню. parent_id делает её подкатегорией "
+            "(например «Холодные» внутри «Напитки»). Возвращает id — "
+            "используй его для create_menu_items."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Название категории."},
+                "parent_id": {
+                    "type": "string",
+                    "description": "id родительской категории. Не задан — корневая.",
+                },
+            },
+            "required": ["title"],
+        },
+    },
+    {
+        "name": "update_menu_category",
+        "description": (
+            "Переименовать категорию и/или переместить её. parent_id: id "
+            "нового родителя, ПУСТАЯ СТРОКА — сделать корневой, не "
+            "передан — не менять. Циклы запрещены."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "category_id": {"type": "string"},
+                "title": {"type": "string"},
+                "parent_id": {"type": "string"},
+            },
+            "required": ["category_id"],
+        },
+    },
+    {
+        "name": "create_menu_items",
+        "description": (
+            "Батч-создание позиций меню (до 60 за вызов) — основной "
+            "инструмент импорта меню с фото. Каждая позиция: category_id "
+            "(обязателен, бери из list_menu_categories или создай "
+            "категорию), title, price; опционально portion "
+            "(например «250 г»), description. ВЫЗЫВАЙ ТОЛЬКО после "
+            "явного подтверждения юзером черновика."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "items": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "category_id": {"type": "string"},
+                            "title": {"type": "string"},
+                            "price": {"type": "number"},
+                            "portion": {"type": "string"},
+                            "description": {"type": "string"},
+                        },
+                        "required": ["category_id", "title", "price"],
+                    },
+                },
+            },
+            "required": ["items"],
+        },
+    },
+    {
+        "name": "update_menu_item",
+        "description": (
+            "Правка позиции меню: description (описание блюда), price, "
+            "portion, title, category_id (перенос в другую категорию/"
+            "подкатегорию — так делается раскладка меню). Для массовой "
+            "раскладки вызывай по одной позиции после подтверждения плана."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "item_id": {"type": "string"},
+                "title": {"type": "string"},
+                "price": {"type": "number"},
+                "portion": {"type": "string"},
+                "description": {"type": "string"},
+                "category_id": {"type": "string"},
+            },
+            "required": ["item_id"],
+        },
+    },
+
     # ── Заметки и напоминалки ──────────────────────────────────────
     {
         "name": "list_notes",
