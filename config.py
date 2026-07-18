@@ -15,7 +15,7 @@ class Settings(BaseSettings):
     # LLM
     anthropic_api_key: str
     groq_api_key: str
-    claude_model: str = "claude-haiku-4-5-20251001"
+    claude_model: str = "claude-sonnet-5"
     # Отдельная модель для фото (пусто = использовать claude_model).
     # Для чтения меню с фото ставь claude-sonnet-4-6 — Haiku размытый
     # текст не тянет.
