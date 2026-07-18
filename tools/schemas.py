@@ -327,6 +327,66 @@ TOOLS: list[dict[str, Any]] = [
         },
     },
 
+    # ── Время, заметки, напоминалки, аналитика (Phase 4-lite) ─────
+    {
+        "name": "get_datetime_now",
+        "description": (
+            "Текущие дата, время и день недели в таймзоне юзера. ВЫЗЫВАЙ "
+            "перед create_reminder, если время указано относительно "
+            "(«завтра в 10», «через час», «в пятницу»)."
+        ),
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "create_note",
+        "description": (
+            "Создать личную заметку юзера («запиши: …»). content — текст, "
+            "header — необязательный заголовок."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "header": {"type": "string"},
+            },
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "create_reminder",
+        "description": (
+            "Создать напоминалку — уведомление придёт этим же ботом в "
+            "назначенное время. remind_at_iso — «YYYY-MM-DD HH:MM» в "
+            "таймзоне юзера; для относительного времени сначала вызови "
+            "get_datetime_now и посчитай. Мелкая операция — подтверждение "
+            "плана не нужно, просто создай и скажи когда напомнишь."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "text": {"type": "string", "description": "О чём напомнить."},
+                "remind_at_iso": {"type": "string", "description": "YYYY-MM-DD HH:MM"},
+            },
+            "required": ["text", "remind_at_iso"],
+        },
+    },
+    {
+        "name": "sales_summary",
+        "description": (
+            "Аналитика продаж заведения за период (по умолчанию 7 дней): "
+            "касса, чаевые, заказы, разбивка по дням, топ-10 позиций, "
+            "позиции без единой продажи. Для «как прошла неделя», «что "
+            "заказывают», «что не идёт», «что убрать из меню»."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "days": {"type": "integer", "description": "Период в днях, 1-90. По умолчанию 7."},
+            },
+            "required": [],
+        },
+    },
+
     # ── Заметки и напоминалки ──────────────────────────────────────
     {
         "name": "list_notes",

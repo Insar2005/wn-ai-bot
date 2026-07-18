@@ -1126,3 +1126,204 @@ async def delete_menu_items(
     if not_found:
         out["not_found"] = not_found
     return out
+
+
+# ═══════════════════════════════════════════════════════════════════
+# Phase 4-lite: время, заметки, напоминалки, аналитика продаж
+# ═══════════════════════════════════════════════════════════════════
+
+
+async def get_datetime_now(user_id: int) -> dict[str, Any]:
+    """Текущие дата и время в таймзоне юзера. Вызывай ПЕРЕД созданием
+    напоминалок с относительным временем («завтра в 10», «через час»)."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    pool = get_pool()
+    tz_name = (
+        await pool.fetchval("SELECT timezone FROM users WHERE id = $1", user_id)
+        or "Europe/Moscow"
+    )
+    try:
+        tz = ZoneInfo(tz_name)
+    except Exception:
+        tz = ZoneInfo("Europe/Moscow")
+        tz_name = "Europe/Moscow"
+    now = datetime.now(tz)
+    weekdays = ["понедельник", "вторник", "среда", "четверг",
+                "пятница", "суббота", "воскресенье"]
+    return {
+        "iso": now.strftime("%Y-%m-%d %H:%M"),
+        "weekday": weekdays[now.weekday()],
+        "timezone": tz_name,
+        "unix": int(now.timestamp()),
+    }
+
+
+async def create_note(
+    user_id: int,
+    content: str,
+    header: Optional[str] = None,
+) -> dict[str, Any]:
+    """Создать личную заметку юзера."""
+    pool = get_pool()
+    content = (content or "").strip()
+    if not content:
+        return {"error": "empty_content"}
+    note_id = _nanoid()
+    now = int(__import__("time").time())
+    await pool.execute(
+        """
+        INSERT INTO notes
+            (id, user_id, scope, workplace_id, shift_id, header, content,
+             pinned, created_at, updated_at)
+        VALUES ($1, $2, 'global', NULL, NULL, $3, $4, FALSE, $5, $5)
+        """,
+        note_id,
+        user_id,
+        (header or "").strip()[:100] or None,
+        content[:4000],
+        now,
+    )
+    return {"ok": True, "id": note_id}
+
+
+async def create_reminder(
+    user_id: int,
+    text: str,
+    remind_at_iso: str,
+) -> dict[str, Any]:
+    """Создать напоминалку. remind_at_iso — «YYYY-MM-DD HH:MM» в таймзоне
+    юзера (возьми текущее время через get_datetime_now и посчитай).
+    Уведомление придёт этим же ботом в назначенный момент."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    pool = get_pool()
+    text = (text or "").strip()
+    if not text:
+        return {"error": "empty_text"}
+    tz_name = (
+        await pool.fetchval("SELECT timezone FROM users WHERE id = $1", user_id)
+        or "Europe/Moscow"
+    )
+    try:
+        dt = datetime.strptime(remind_at_iso.strip(), "%Y-%m-%d %H:%M")
+        dt = dt.replace(tzinfo=ZoneInfo(tz_name))
+    except Exception:
+        return {"error": "bad_datetime", "expected": "YYYY-MM-DD HH:MM"}
+    remind_at = int(dt.timestamp())
+    now = int(__import__("time").time())
+    if remind_at <= now:
+        return {"error": "time_in_past", "now_hint": "вызови get_datetime_now"}
+
+    reminder_id = _nanoid()
+    await pool.execute(
+        """
+        INSERT INTO reminders
+            (id, user_id, text, remind_at, lead_minutes, is_done,
+             notified_at, created_at)
+        VALUES ($1, $2, $3, $4, 0, FALSE, NULL, $5)
+        """,
+        reminder_id,
+        user_id,
+        text[:255],
+        remind_at,
+        now,
+    )
+    return {"ok": True, "id": reminder_id, "remind_at": remind_at}
+
+
+async def sales_summary(
+    user_id: int,
+    days: int = 7,
+) -> dict[str, Any]:
+    """Аналитика продаж заведения за период: касса/чаевые/заказы по дням,
+    топ позиций, позиции меню без продаж. Для «как прошла неделя»,
+    «что заказывают», «что не идёт»."""
+    pool = get_pool()
+    workplace_id = await _active_workplace_checked(user_id)
+    if workplace_id is None:
+        return {"error": "no_active_workplace"}
+    days = max(1, min(int(days or 7), 90))
+    tz_name = (
+        await pool.fetchval("SELECT timezone FROM users WHERE id = $1", user_id)
+        or "Europe/Moscow"
+    )
+    cutoff = int(__import__("time").time()) - days * 86400
+
+    totals = await pool.fetchrow(
+        """
+        SELECT COALESCE(SUM(o.total_price), 0) AS revenue,
+               COALESCE(SUM(o.tips), 0) AS tips,
+               COUNT(*) AS orders
+        FROM orders o
+        JOIN shifts s ON s.id = o.shift_id
+        WHERE s.workplace_id = $1 AND o.is_paid AND o.closed_at >= $2
+        """,
+        workplace_id,
+        cutoff,
+    )
+    by_day = await pool.fetch(
+        """
+        SELECT to_char(to_timestamp(o.closed_at) AT TIME ZONE $3, 'YYYY-MM-DD') AS day,
+               COALESCE(SUM(o.total_price), 0) AS revenue,
+               COUNT(*) AS orders
+        FROM orders o
+        JOIN shifts s ON s.id = o.shift_id
+        WHERE s.workplace_id = $1 AND o.is_paid AND o.closed_at >= $2
+        GROUP BY 1 ORDER BY 1
+        """,
+        workplace_id,
+        cutoff,
+        tz_name,
+    )
+    top = await pool.fetch(
+        """
+        SELECT oi.title,
+               SUM(oi.quantity) AS qty,
+               COALESCE(SUM(oi.total_price), 0) AS revenue
+        FROM order_items oi
+        JOIN orders o ON o.id = oi.order_id
+        JOIN shifts s ON s.id = o.shift_id
+        WHERE s.workplace_id = $1 AND o.is_paid AND o.closed_at >= $2
+        GROUP BY oi.title
+        ORDER BY qty DESC
+        LIMIT 10
+        """,
+        workplace_id,
+        cutoff,
+    )
+    dead = await pool.fetch(
+        """
+        SELECT mi.title
+        FROM menu_items mi
+        JOIN menu_categories mc ON mc.id = mi.category_id
+        WHERE mc.workplace_id = $1 AND mi.is_active AND mc.is_active
+          AND NOT EXISTS (
+            SELECT 1 FROM order_items oi
+            JOIN orders o ON o.id = oi.order_id
+            WHERE oi.menu_item_id = mi.id
+              AND o.is_paid AND o.closed_at >= $2
+          )
+        ORDER BY mi.title
+        LIMIT 15
+        """,
+        workplace_id,
+        cutoff,
+    )
+    return {
+        "days": days,
+        "revenue": float(totals["revenue"]),
+        "tips": float(totals["tips"]),
+        "orders": int(totals["orders"]),
+        "by_day": [
+            {"day": r["day"], "revenue": float(r["revenue"]), "orders": int(r["orders"])}
+            for r in by_day
+        ],
+        "top_items": [
+            {"title": r["title"], "qty": int(r["qty"]), "revenue": float(r["revenue"])}
+            for r in top
+        ],
+        "no_sales_items": [r["title"] for r in dead],
+    }

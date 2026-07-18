@@ -48,6 +48,10 @@ _TOOLS: dict[str, Callable[..., Awaitable[Any]]] = {
     "update_menu_item": impl.update_menu_item,
     "delete_menu_category": impl.delete_menu_category,
     "delete_menu_items": impl.delete_menu_items,
+    "get_datetime_now": impl.get_datetime_now,
+    "create_note": impl.create_note,
+    "create_reminder": impl.create_reminder,
+    "sales_summary": impl.sales_summary,
     "list_notes": impl.list_notes,
     "list_reminders": impl.list_reminders,
 }
