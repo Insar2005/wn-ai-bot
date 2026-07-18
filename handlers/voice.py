@@ -15,7 +15,7 @@ from ai.whisper import transcribe
 from config import settings
 from db import load_recent_history, save_message
 from handlers.text import NOT_REGISTERED_MSG
-from tools.impl import resolve_user
+from tools.impl import get_active_workplace_title, resolve_user
 
 log = logging.getLogger(__name__)
 
@@ -83,11 +83,16 @@ async def handle_voice(message: Message) -> None:
         history = await load_recent_history(
             tg_id, limit=settings.context_messages_limit
         )
+        wp_title = await get_active_workplace_title(user["user_id"])
+        wp_mark = (
+            f"⟦заведение: {wp_title}⟧" if wp_title else "⟦заведение не выбрано⟧"
+        )
+        ctx_transcript = f"{wp_mark} {transcript}"
         try:
             async with lock_for(tg_id), typing(message.bot, message.chat.id):
                 reply, _ = await chat_text(
                     history=history,
-                    user_message=transcript,
+                    user_message=ctx_transcript,
                     user_id=user["user_id"],
                 )
         except Exception:
@@ -101,7 +106,7 @@ async def handle_voice(message: Message) -> None:
             tg_id,
             "user",
             "voice",
-            transcript,
+            ctx_transcript,
             metadata={"duration_sec": message.voice.duration},
         )
         await save_message(tg_id, "assistant", "text", reply)

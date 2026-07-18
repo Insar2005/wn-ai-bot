@@ -697,6 +697,20 @@ async def _active_workplace_checked(user_id: int) -> Optional[str]:
     return workplace_id if has_access else None
 
 
+async def get_active_workplace_title(user_id: int) -> Optional[str]:
+    """Название активного заведения юзера (для пометки контекста в чате).
+    Не tool — используется хендлерами напрямую."""
+    pool = get_pool()
+    return await pool.fetchval(
+        """
+        SELECT w.title FROM users u
+        JOIN workplaces w ON w.id = u.last_workplace_id
+        WHERE u.id = $1
+        """,
+        user_id,
+    )
+
+
 async def _category_in_workplace(category_id: str, workplace_id: str):
     pool = get_pool()
     return await pool.fetchrow(
